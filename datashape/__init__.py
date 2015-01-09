@@ -11,10 +11,11 @@ from .overload_resolver import *
 from .discovery import discover
 from .util import *
 from .coercion import coercion_cost
+from .promote import promote, optionify
 from .error import (DataShapeSyntaxError, OverloadError, UnificationError,
                     CoercionError)
 
-__version__ = '0.4.0'
+__version__ = '0.4.2'
 
 def test(verbose=False, xunitfile=None, exit=False):
     """

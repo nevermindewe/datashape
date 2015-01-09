@@ -7,10 +7,8 @@ shape and data type.
 """
 
 import ctypes
-import datetime
 import operator
 from math import ceil
-import re
 
 import numpy as np
 
@@ -65,7 +63,7 @@ class Mono(object):
     @property
     def parameters(self):
         if hasattr(self, '__slots__'):
-            return tuple(getattr(self, slot) for slot in self.__slots__)
+            return tuple([getattr(self, slot) for slot in self.__slots__])
         else:
             return self._parameters
 
@@ -91,9 +89,6 @@ class Mono(object):
     def __getitem__(self, key):
         lst = [self]
         return lst[key]
-
-    def __ne__(self, other):
-        return not (self == other)
 
     def __repr__(self):
         return '%s(%s)' % (type(self).__name__,
@@ -212,7 +207,8 @@ class IntegerConstant(Unit):
         elif isinstance(other, IntegerConstant):
             return self.val == other.val
         else:
-            raise TypeError("Cannot compare type %s to type %s" % (type(self), type(other)))
+            raise TypeError("Cannot compare type %r to type %r" %
+                            (type(self).__name__, type(other).__name__))
 
     def __hash__(self):
         return hash(self.val)
@@ -240,7 +236,8 @@ class StringConstant(Unit):
         elif isinstance(other, StringConstant):
             return self.val == other.val
         else:
-            raise TypeError("Cannot compare type %s to type %s" % (type(self), type(other)))
+            raise TypeError("Cannot compare type %r to type %r" %
+                            (type(self).__name__, type(other).__name__))
 
     def __hash__(self):
         return hash(self.val)
@@ -298,6 +295,55 @@ class DateTime(Unit):
         return np.dtype('datetime64[us]')
 
 
+_units = set(['ns', 'us', 'ms', 's', 'm', 'h', 'D', 'W', 'M', 'Y'])
+
+
+_unit_aliases = {'year': 'Y', 'week': 'W', 'day': 'D', 'date': 'D', 'hour':
+                 'h', 'second': 's', 'millisecond': 'ms', 'microsecond':
+                 'us', 'nanosecond': 'ns'}
+
+
+def normalize_time_unit(s):
+    """ Normalize time input to one of 'year', 'second', 'millisecond', etc..
+    Example
+    -------
+    >>> normalize_time_unit('milliseconds')
+    'ms'
+    >>> normalize_time_unit('ms')
+    'ms'
+    >>> normalize_time_unit('nanoseconds')
+    'ns'
+    >>> normalize_time_unit('nanosecond')
+    'ns'
+    """
+    s = s.strip()
+    if s in _units:
+        return s
+    if s in _unit_aliases:
+        return _unit_aliases[s]
+    if s[-1] == 's' and len(s) > 2:
+        return normalize_time_unit(s.rstrip('s'))
+
+    raise ValueError("Do not understand time unit %s" % s)
+
+
+class TimeDelta(Unit):
+    cls = MEASURE
+    __slots__ = 'unit',
+
+    def __init__(self, unit='us'):
+        self.unit = normalize_time_unit(str(unit))
+
+    def __str__(self):
+        return 'timedelta[unit=%r]' % self.unit
+
+    def __repr__(self):
+        return '%s(unit=%r)' % (type(self).__name__, self.unit)
+
+    def to_numpy_dtype(self):
+        return np.dtype('timedelta64[%s]' % self.unit)
+
+
 class Units(Unit):
     """ Units type for values with physical units """
     cls = MEASURE
@@ -350,54 +396,43 @@ _canonical_string_encodings = {
 
 
 class String(Unit):
-    """ String container """
+    """ String container
+
+    >>> String()
+    ctype("string")
+    >>> String(10, 'ascii')
+    ctype("string[10, 'A']")
+    """
     cls = MEASURE
     __slots__ = 'fixlen', 'encoding'
 
-    def __init__(self, fixlen=None, encoding=None):
-        # TODO: Do this constructor better...
-        if fixlen is None and encoding is None:
-            # String()
-            self.fixlen = None
-            self.encoding = u'U8'
-        elif isinstance(fixlen, _inttypes + (IntegerConstant,)) and \
-                        encoding is None:
-            # String(fixlen)
-            if isinstance(fixlen, IntegerConstant):
-                self.fixlen = fixlen.val
-            else:
-                self.fixlen = fixlen
-            self.encoding = u'U8'
-        elif isinstance(fixlen, _strtypes + (StringConstant,)) and \
-                        encoding is None:
-            # String('encoding')
-            self.fixlen = None
-            if isinstance(fixlen, StringConstant):
-                self.encoding = fixlen.val
-            else:
-                self.encoding = unicode(fixlen)
-        elif isinstance(fixlen, _inttypes + (IntegerConstant,)) and \
-                        isinstance(encoding, _strtypes + (StringConstant,)):
-            # String(fixlen, 'encoding')
-            if isinstance(fixlen, IntegerConstant):
-                self.fixlen = fixlen.val
-            else:
-                self.fixlen = fixlen
-            if isinstance(encoding, StringConstant):
-                self.encoding = encoding.val
-            else:
-                self.encoding = unicode(encoding)
-        else:
-            raise ValueError(('Unexpected types to String constructor '
-                            '(%s, %s)') % (type(fixlen), type(encoding)))
+    def __init__(self, *args):
+        if len(args) == 0:
+            fixlen, encoding = None, None
+        if len(args) == 1:
+            if isinstance(args[0], _strtypes):
+                fixlen, encoding = None, args[0]
+            if isinstance(args[0], _inttypes + (IntegerConstant,)):
+                fixlen, encoding = args[0], None
+        if len(args) == 2:
+            fixlen, encoding = args
 
-        # Validate the encoding
-        if not self.encoding in _canonical_string_encodings:
+        encoding = encoding or 'U8'
+        if isinstance(encoding, str):
+            encoding = unicode(encoding)
+        try:
+            encoding = _canonical_string_encodings[encoding]
+        except KeyError:
             raise ValueError('Unsupported string encoding %s' %
-                            repr(self.encoding))
+                             repr(encoding))
+
+        if isinstance(fixlen, IntegerConstant):
+            fixlen = fixlen.val
+
+        self.encoding = encoding
+        self.fixlen = fixlen
 
         # Put it in a canonical form
-        self.encoding = _canonical_string_encodings[self.encoding]
 
     def __str__(self):
         if self.fixlen is None and self.encoding == 'U8':
@@ -407,11 +442,12 @@ class String(Unit):
         elif self.fixlen is None and self.encoding != 'U8':
             return 'string[%s]' % repr(self.encoding).strip('u')
         else:
-            return 'string[%i, %s]' % \
-                            (self.fixlen, repr(self.encoding).strip('u'))
+            return 'string[%i, %s]' % (self.fixlen,
+                                       repr(self.encoding).strip('u'))
 
     def __repr__(self):
-        return ''.join(["ctype(\"", str(self).encode('unicode_escape').decode('ascii'), "\")"])
+        s = str(self)
+        return 'ctype("%s")' % s.encode('unicode_escape').decode('ascii')
 
     def to_numpy_dtype(self):
         """
@@ -436,15 +472,47 @@ class String(Unit):
 
 
 class DataShape(Mono):
-    """The DataShape class, implementation for generic composite
-    datashape objects"""
+    """
+    Composite container for datashape elements.
+
+    Elements of a datashape like ``Fixed(3)``, ``Var()`` or ``int32`` are on,
+    on their own, valid datashapes.  These elements are collected together into
+    a composite ``DataShape`` to be complete.
+
+    This class is not intended to be used directly.  Instead, use the utility
+    ``dshape`` function to create datashapes from strings or datashape
+    elements.
+
+    Examples
+    --------
+
+    >>> from datashape import Fixed, int32, DataShape, dshape
+
+    >>> DataShape(Fixed(5), int32)  # Rare to DataShape directly
+    dshape("5 * int32")
+
+    >>> dshape('5 * int32')         # Instead use the dshape function
+    dshape("5 * int32")
+
+    >>> dshape([Fixed(5), int32])   # It can even do construction from elements
+    dshape("5 * int32")
+
+    See Also
+    --------
+    datashape.dshape
+    """
 
     __metaclass__ = Type
     composite = False
 
     def __init__(self, *parameters, **kwds):
+        if len(parameters) == 1 and isinstance(parameters[0], _strtypes):
+            raise TypeError("DataShape constructor for internal use.\n"
+                            "Use dshape function to convert strings into "
+                            "datashapes.\nTry:\n\tdshape('%s')"
+                            % parameters[0])
         if len(parameters) > 0:
-            self._parameters = tuple(parameters)
+            self._parameters = tuple(map(_launder, parameters))
             if getattr(self._parameters[-1], 'cls', MEASURE) != MEASURE:
                 raise TypeError(('Only a measure can appear on the'
                                 ' last position of a datashape, not %s') %
@@ -455,8 +523,8 @@ class DataShape(Mono):
                                     ' last position of a datashape, not %s') %
                                     repr(dim))
         else:
-            raise ValueError(('the data shape should be constructed from 2 or'
-                            ' more parameters, only got %s') % (len(parameters)))
+            raise ValueError('the data shape should be constructed from 2 or'
+                             ' more parameters, only got %s' % len(parameters))
         self.composite = True
 
         name = kwds.get('name')
@@ -481,14 +549,16 @@ class DataShape(Mono):
         if self.name:
             res = self.name
         else:
-            res = (' * '.join(map(str, self.parameters)))
+            res = ' * '.join(map(str, self.parameters))
 
         return res
 
     def __repr__(self):
-        return ''.join(["dshape(\"",
-                        str(self).encode('unicode_escape').decode('ascii'),
-                        "\")"])
+        s = pprint(self)
+        if '\n' in s:
+            return 'dshape("""%s""")' % s
+        else:
+            return 'dshape("%s")' % s
 
     @property
     def shape(self):
@@ -502,7 +572,8 @@ class DataShape(Mono):
         """Return a data shape object with Fixed dimensions replaced
         by TypeVar dimensions.
         """
-        newparams = [TypeVar('i%s'%n) for n in range(len(self.parameters)-1)]
+        newparams = [TypeVar('i%d' % n)
+                     for n in range(len(self.parameters) - 1)]
         newparams.append(self.parameters[-1])
         return DataShape(*newparams)
 
@@ -517,8 +588,8 @@ class DataShape(Mono):
         dshape("3 * int32")
         """
         if leading >= len(self.parameters):
-            raise IndexError(('Not enough dimensions in data shape '
-                            'to remove %d leading dimensions.') % leading)
+            raise IndexError('Not enough dimensions in data shape '
+                             'to remove %d leading dimensions.' % leading)
         elif leading in [len(self.parameters) - 1, -1]:
             return DataShape(self.parameters[-1])
         else:
@@ -528,7 +599,6 @@ class DataShape(Mono):
         if isinstance(other, _inttypes):
             other = Fixed(other)
         return DataShape(other, *self)
-
 
     @property
     def subshape(self):
@@ -541,16 +611,16 @@ class DataShape(Mono):
 
         >>> ds = dshape('var * {name: string, amount: int32}')
         >>> print(ds.subshape[0])
-        { name : string, amount : int32 }
+        {name: string, amount: int32}
 
         >>> print(ds.subshape[0:3])
-        3 * { name : string, amount : int32 }
+        3 * {name: string, amount: int32}
 
         >>> print(ds.subshape[0:7:2, 'amount'])
         4 * int32
 
         >>> print(ds.subshape[[1, 10, 15]])
-        3 * { name : string, amount : int32 }
+        3 * {name: string, amount: int32}
 
         >>> ds = dshape('{x: int, y: int}')
         >>> print(ds.subshape['x'])
@@ -562,15 +632,16 @@ class DataShape(Mono):
 
         >>> ds = dshape('var * {name: string, amount: int32, id: int32}')
         >>> print(ds.subshape[:, [0, 2]])
-        var * { name : string, id : int32 }
+        var * {name: string, id: int32}
 
         >>> ds = dshape('var * {name: string, amount: int32, id: int32}')
         >>> print(ds.subshape[:, ['name', 'id']])
-        var * { name : string, id : int32 }
+        var * {name: string, id: int32}
 
         >>> print(ds.subshape[0, 1:])
-        { amount : int32, id : int32 }
+        {amount: int32, id: int32}
         """
+        from .predicates import isdimension
         if isinstance(index, _inttypes) and isdimension(self[0]):
             return self.subarray(1)
         if isinstance(self[0], Record) and isinstance(index, _strtypes):
@@ -581,7 +652,7 @@ class DataShape(Mono):
             rec = self[0]
             # Translate strings to corresponding integers
             index = [self[0].names.index(i) if isinstance(i, _strtypes) else i
-                        for i in index]
+                     for i in index]
             return DataShape(Record([rec.parameters[0][i] for i in index]))
         if isinstance(self[0], Record) and isinstance(index, slice):
             rec = self[0]
@@ -618,10 +689,7 @@ class Option(Mono):
     __slots__ = 'ty',
 
     def __init__(self, ds):
-        if isinstance(ds, DataShape) and len(ds) == 1:
-            ds = ds[0]
-
-        self.ty = ds
+        self.ty = _launder(ds)
 
     @property
     def shape(self):
@@ -630,8 +698,7 @@ class Option(Mono):
     def __str__(self):
         return '?%s' % str(self.ty)
 
-    def __repr__(self):
-        return str(self)
+    __repr__ = __str__
 
 
 class CType(Unit):
@@ -671,6 +738,9 @@ class CType(Unit):
             unit, _ = np.datetime_data(dt)
             defaults = {'D': date_, 'Y': date_, 'M': date_, 'W': date_}
             return defaults.get(unit, datetime_)
+        elif np.issubdtype(dt, np.timedelta64):
+            unit, _ = np.datetime_data(dt)
+            return TimeDelta(unit=unit)
         elif np.issubdtype(dt, np.unicode_):
             return String(dt.itemsize // 4, 'U32')
         elif np.issubdtype(dt, np.str_) or np.issubdtype(dt, np.bytes_):
@@ -698,15 +768,16 @@ class CType(Unit):
         """
         # Fixup the complex type to how numpy does it
         s = self.name
-        s = {'complex[float32]':'complex64',
-             'complex[float64]':'complex128'}.get(s, s)
+        s = {'complex[float32]': 'complex64',
+             'complex[float64]': 'complex128'}.get(s, s)
         return np.dtype(s)
 
     def __str__(self):
         return self.name
 
     def __repr__(self):
-        return ''.join(["ctype(\"", str(self).encode('unicode_escape').decode('ascii'), "\")"])
+        s = str(self)
+        return 'ctype("%s")' % s.encode('unicode_escape').decode('ascii')
 
 
 class Fixed(Unit):
@@ -768,7 +839,7 @@ class TypeVar(Unit):
         self.symbol = symbol
 
     def __repr__(self):
-        return "TypeVar(%s)" % (str(self),)
+        return "TypeVar(%s)" % self
 
     def __str__(self):
         return str(self.symbol)
@@ -789,7 +860,7 @@ class Implements(Mono):
         return self.parameters[1]
 
     def __repr__(self):
-        return '%s : %s' % (self.typevar, self.typeset.name)
+        return '%s: %s' % (self.typevar, self.typeset.name)
 
 
 class Function(Mono):
@@ -811,11 +882,52 @@ class Function(Mono):
     #     return " -> ".join(map(repr, self.parameters))
 
     def __str__(self):
-        return ('(' + ', '.join(map(str, self.parameters[:-1])) +
-                ') -> ' + str(self.parameters[-1]))
+        return '(%s) -> %s' % (', '.join(map(str, self.parameters[:-1])),
+                               self.parameters[-1])
 
 
-class Record(Mono):
+def _launder(x):
+    """ Clean up types prior to insertion into DataShape
+
+    >>> from datashape import dshape
+    >>> _launder(5)         # convert ints to Fixed
+    Fixed(5)
+    >>> _launder('int32')   # parse strings
+    ctype("int32")
+    >>> _launder(dshape('int32'))
+    ctype("int32")
+    >>> _launder(Fixed(5))  # No-op on valid parameters
+    Fixed(5)
+    """
+    if isinstance(x, _inttypes):
+        x = Fixed(x)
+    if isinstance(x, _strtypes):
+        return Type.lookup_type(x)
+    if isinstance(x, DataShape) and len(x) == 1:
+        return x[0]
+    return x
+
+
+def _launder_key(k):
+    """
+
+    >>> _launder_key('Hello')
+    'Hello'
+    >>> _launder_key(0)
+    '0'
+    """
+    if isinstance(k, _strtypes):
+        return k
+    return str(k)
+
+
+class CollectionPrinter(object):
+    def __repr__(self):
+        s = str(self)
+        return 'dshape("%s")' % s.encode('unicode_escape').decode('ascii')
+
+
+class Record(CollectionPrinter, Mono):
     """
     A composite data structure of ordered fields mapped to types.
 
@@ -835,7 +947,7 @@ class Record(Mono):
     -------
 
     >>> Record([['id', 'int'], ['name', 'string'], ['amount', 'real']])
-    dshape("{ id : int32, name : string, amount : float64 }")
+    dshape("{id: int32, name: string, amount: float64}")
     """
     cls = MEASURE
 
@@ -850,21 +962,7 @@ class Record(Mono):
         # preserved. Using RecordDecl there is some magic to also
         # ensure that the fields align in the order they are
         # declared.
-        def normalize(typ):
-            """ Normalize type inputs to Record
-
-            >>> normalize('string')
-            dshape('string')
-            >>> normalize(dshape('int32'))
-            ctype('int32')
-            """
-            if isinstance(typ, _strtypes):
-                return Type.lookup_type(typ)
-            if isinstance(typ, DataShape) and len(typ) == 1:
-                return typ[0]
-            return typ
-
-        fields = tuple((k, normalize(v)) for k, v in fields)
+        fields = tuple((_launder_key(k), _launder(v)) for k, v in fields)
         self._parameters = (tuple(map(tuple, fields)),)
 
     @property
@@ -887,20 +985,17 @@ class Record(Mono):
         """
         To Numpy record dtype.
         """
-        return np.dtype([(name, to_numpy_dtype(typ))
+        return np.dtype([(str(name), to_numpy_dtype(typ))
                          for name, typ in self.fields])
 
     def __getitem__(self, key):
         return self.dict[key]
 
     def __str__(self):
-        return record_string(self.names, self.types)
-
-    def __repr__(self):
-        return ''.join(["dshape(\"", str(self).encode('unicode_escape').decode('ascii'), "\")"])
+        return pprint(self)
 
 
-class Tuple(Mono):
+class Tuple(CollectionPrinter, Mono):
     """
     A product type.
     """
@@ -915,23 +1010,24 @@ class Tuple(Mono):
             The datashapes which make up the tuple.
         """
         dshapes = [DataShape(ds) if not isinstance(ds, DataShape) else ds
-                for ds in dshapes]
+                   for ds in dshapes]
         self.dshapes = tuple(dshapes)
 
     def __str__(self):
-        return '(' + ', '.join(str(x) for x in self.dshapes) + ')'
+        return '(%s)' % ', '.join(map(str, self.dshapes))
 
-    def __repr__(self):
-        return ''.join(["dshape(\"", str(self).encode('unicode_escape').decode('ascii'), "\")"])
+    def to_numpy_dtype(self):
+        """
+        To Numpy record dtype.
+        """
+        return np.dtype([('f%d' % i, to_numpy_dtype(typ))
+                         for i, typ in enumerate(self.parameters[0])])
 
 
 class JSON(Mono):
     """ JSON measure """
     cls = MEASURE
     __slots__ = ()
-
-    def __init__(self):
-        pass
 
     def __str__(self):
         return 'json'
@@ -957,19 +1053,22 @@ uint64 = CType('uint64', 8, ctypes.alignment(ctypes.c_uint64))
 float16 = CType('float16', 2, ctypes.alignment(ctypes.c_uint16))
 float32 = CType('float32', 4, ctypes.alignment(ctypes.c_float))
 float64 = CType('float64', 8, ctypes.alignment(ctypes.c_double))
-#float128 = CType('float128', 16)
+# float128 = CType('float128', 16)
 
 # real is an alias for float64
 real = float64
 Type.register('real', real)
 
-complex_float32 = CType('complex[float32]', 8, ctypes.alignment(ctypes.c_float))
-complex_float64 = CType('complex[float64]', 16, ctypes.alignment(ctypes.c_double))
+complex_float32 = CType('complex[float32]', 8,
+                        ctypes.alignment(ctypes.c_float))
+complex_float64 = CType('complex[float64]', 16,
+                        ctypes.alignment(ctypes.c_double))
 Type.register('complex64', complex_float32)
-complex64  = complex_float32
+complex64 = complex_float32
+
 Type.register('complex128', complex_float64)
 complex128 = complex_float64
-#complex256 = CType('complex256', 32)
+# complex256 = CType('complex256', 32)
 
 # complex is an alias for complex[float64]
 complex_ = complex_float64
@@ -977,9 +1076,11 @@ complex_ = complex_float64
 date_ = Date()
 time_ = Time()
 datetime_ = DateTime()
+timedelta_ = TimeDelta()
 Type.register('date', date_)
 Type.register('time', time_)
 Type.register('datetime', datetime_)
+Type.register('timedelta', timedelta_)
 
 null = Null()
 Type.register('null', null)
@@ -1012,8 +1113,11 @@ Type.register('uintptr', uintptr)
 c_half = float16
 c_float = float32
 c_double = float64
-# TODO: Deal with the longdouble == one of float64/float80/float96/float128 situation
-#c_longdouble = float128
+
+# TODO: Deal with the longdouble == one of float64/float80/float96/float128
+# situation
+
+# c_longdouble = float128
 
 half = float16
 single = float32
@@ -1021,8 +1125,8 @@ double = float64
 
 void = CType('void', 0, 1)
 object_ = pyobj = CType('object',
-                ctypes.sizeof(ctypes.py_object),
-                ctypes.alignment(ctypes.py_object))
+                        ctypes.sizeof(ctypes.py_object),
+                        ctypes.alignment(ctypes.py_object))
 
 na = Null
 NullRecord = Record(())
@@ -1048,10 +1152,12 @@ class NotNumpyCompatible(Exception):
     """
     pass
 
+
 def to_numpy_dtype(ds):
     """ Throw away the shape information and just return the
     measure as NumPy dtype instance."""
     return to_numpy(ds.measure)[1]
+
 
 def to_numpy(ds):
     """
@@ -1068,8 +1174,6 @@ def to_numpy(ds):
     shape = tuple()
     dtype = None
 
-    #assert isinstance(ds, DataShape)
-
     if isinstance(ds, DataShape):
         # The datashape dimensions
         for dim in ds[:-1]:
@@ -1080,7 +1184,8 @@ def to_numpy(ds):
             elif isinstance(dim, TypeVar):
                 shape += (-1,)
             else:
-                raise NotNumpyCompatible('DataShape dimension %s is not NumPy-compatible' % dim)
+                raise NotNumpyCompatible('DataShape dimension %s is not'
+                                         ' NumPy-compatible' % dim)
 
         # The datashape measure
         msr = ds[-1]
@@ -1090,11 +1195,13 @@ def to_numpy(ds):
     try:
         dtype = msr.to_numpy_dtype()
     except AttributeError:
-        raise NotNumpyCompatible('DataShape measure %s is not NumPy-compatible' % msr)
+        raise NotNumpyCompatible('DataShape measure %s is not NumPy-compatible'
+                                 % msr)
 
     if type(dtype) != np.dtype:
-        raise NotNumpyCompatible('Internal Error: Failed to produce NumPy dtype')
-    return (shape, dtype)
+        raise NotNumpyCompatible('Internal Error: Failed to produce NumPy '
+                                 'dtype')
+    return shape, dtype
 
 
 def from_numpy(shape, dt):
@@ -1116,77 +1223,26 @@ def from_numpy(shape, dt):
     elif dtype.kind == 'U':
         measure = String(dtype.itemsize // 4, 'U32')
     elif dtype.fields:
-        field_items = [(name, dtype.fields[name]) for name in dtype.names]
-        rec = [(a,CType.from_numpy_dtype(b[0])) for a,b in field_items]
+        fields = [(name, dtype.fields[name]) for name in dtype.names]
+        rec = [(name, from_numpy(t.shape, t.base))  # recurse into nested dtype
+               for name, (t, _) in fields]  # _ is the byte offset: ignore it
         measure = Record(rec)
     else:
         measure = CType.from_numpy_dtype(dtype)
 
-    if shape == ():
+    if not shape:
         return measure
-    else:
-        return DataShape(*tuple(map(Fixed, shape))+(measure,))
+    return DataShape(*tuple(map(Fixed, shape)) + (measure,))
 
 
-def typeof(obj):
-    """
-    Return a datashape ctype for a python scalar.
-    """
-    if hasattr(obj, "dshape"):
-        return obj.dshape
-    elif isinstance(obj, np.ndarray):
-        return from_numpy(obj.shape, obj.dtype)
-    elif isinstance(obj, _inttypes):
-        return DataShape(int_)
-    elif isinstance(obj, float):
-        return DataShape(double)
-    elif isinstance(obj, complex):
-        return DataShape(complex128)
-    elif isinstance(obj, _strtypes):
-        return DataShape(string)
-    elif isinstance(obj, datetime.timedelta):
-        return DataShape(timedelta64)
-    elif isinstance(obj, datetime.datetime):
-        return DataShape(datetime64)
-    else:
-        return DataShape(pyobj)
+def expr_string(spine, const_args, outer='()'):
+    assert len(outer) == 2
 
-
-def expr_string(spine, const_args, outer=None):
-    if not outer:
-        outer = '()'
+    lhs, rhs = outer
 
     if const_args:
-        return str(spine) + outer[0] + ','.join(map(str,const_args)) + outer[1]
-    else:
-        return str(spine)
-
-
-def record_string(fields, values):
-    # Prints out something like this:
-    #   {a : int32, b: float32, ... }
-    body = ''
-    count = len(fields)
-
-    word_re=re.compile("[a-zA-Z_][a-zA-Z0-9]*$")
-    for i, (k,v) in enumerate(zip(fields,values)):
-        if (i+1) == count:
-            #If we find a troublesome non-alphanumeric character 
-            #  in the key, wrap the key in quotes.  Any troublesome, but
-            #  non-unicode characters should be escaped now.  Unicode will be
-            #  escaped later.
-            if word_re.match(k):
-                body += '%s : %s' % (k,v)
-            else:
-                body += '\'%s\' : %s' % (re.sub(r"(['\\])", r"\\\g<1>", k),v)
-                
-        else:
-            if word_re.match(k):
-                body += '%s : %s, ' % (k,v)
-            else:
-                body += '\'%s\' : %s, ' % (re.sub(r"(['\\])", r"\\\g<1>", k),v)
-
-    return '{ ' + body + ' }'
+        return '%s%s%s%s' % (spine, lhs, ','.join(map(str, const_args)), rhs)
+    return str(spine)
 
 
 def free(ds):
@@ -1204,13 +1260,73 @@ def free(ds):
         return []
 
 
-def type_constructor(ds):
-    """
-    Get the type constructor for the datashape type (Mono).
-    The type constructor indicates how types unify (see unification.py).
-    """
-    return type(ds)
+def print_unicode_string(s):
+    try:
+        return s.decode('unicode_escape').encode('ascii')
+    except AttributeError:
+        return s
 
 
-def isdimension(unit):
-    return isinstance(unit, (Fixed, Var))
+def pprint(ds, width=80):
+    """ Pretty print a datashape
+
+    >>> from datashape import dshape, pprint
+    >>> print(pprint(dshape('5 * 3 * int32')))
+    5 * 3 * int32
+
+    >>> ds = dshape('5000000000 * {a: (int, float32, real, string, datetime), b: {c: 5 * int, d: var * 100 * float32}}')
+    >>> print(pprint(ds))
+    5000000000 * {
+      a: (int32, float32, float64, string, datetime),
+      b: {c: 5 * int32, d: var * 100 * float32}
+      }
+
+    Control width of the result
+    >>> print(pprint(ds, width=30))
+    5000000000 * {
+      a: (
+        int32,
+        float32,
+        float64,
+        string,
+        datetime
+        ),
+      b: {
+        c: 5 * int32,
+        d: var * 100 * float32
+        }
+      }
+    >>>
+    """
+    result = ''
+
+    if isinstance(ds, DataShape):
+        if ds.shape:
+            result += ' * '.join(map(str, ds.shape))
+            result += ' * '
+        ds = ds[-1]
+
+    if isinstance(ds, Record):
+        pairs = ['%s: %s' % (name if ' ' not in name else
+                             repr(print_unicode_string(name)),
+                             pprint(typ, width - len(result) - len(name)))
+                 for name, typ in zip(ds.names, ds.types)]
+        short = '{%s}' % ', '.join(pairs)
+        if len(result + short) < width:
+            return result + short
+        else:
+            long = '{\n%s\n}' % ',\n'.join(pairs)
+            return result + long.replace('\n', '\n  ')
+
+    elif isinstance(ds, Tuple):
+        typs = [pprint(typ, width-len(result))
+                for typ in ds.dshapes]
+        short = '(%s)' % ', '.join(typs)
+        if len(result + short) < width:
+            return result + short
+        else:
+            long = '(\n%s\n)' % ',\n'.join(typs)
+            return result + long.replace('\n', '\n  ')
+    else:
+        result += str(ds)
+    return result

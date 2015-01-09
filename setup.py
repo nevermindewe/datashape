@@ -10,7 +10,7 @@ def read(fname):
 
 setup(
     name = "DataShape",
-    version = "0.4.0",
+    version = "0.4.2",
     author = "Continuum Analytics",
     author_email = "blaze-dev@continuum.io",
     description = ("A data description language."),
@@ -19,7 +19,7 @@ setup(
     url = "http://packages.python.org/datashape",
     packages = ["datashape",
                 "datashape.tests"],
-    install_requires=open('requirements.txt').read().split('\n'),
+    install_requires=open('requirements.txt').read().strip().split('\n'),
     long_description = read('README.rst'),
     classifiers = [
         "Development Status :: 3 - Alpha",
@@ -28,4 +28,3 @@ setup(
         "License :: OSI Approved :: BSD License",
     ],
 )
-

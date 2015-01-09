@@ -1,14 +1,16 @@
 from __future__ import print_function, division, absolute_import
 
+import re
 import numpy as np
 from dateutil.parser import parse as dateparse
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timedelta
 from .dispatch import dispatch
 
 from .coretypes import (int32, int64, float64, bool_, complex128, datetime_,
-                        Option, isdimension, var, from_numpy, Tuple, null,
+                        Option, var, from_numpy, Tuple, null,
                         Record, string, Null, DataShape, real, date_, time_,
-                        Unit)
+                        Unit, timedelta_, TimeDelta, object_)
+from .predicates import isdimension, isrecord
 from .py2help import _strtypes, _inttypes
 from .internal_utils import _toposort, groupby
 
@@ -38,12 +40,12 @@ def discover(z):
 
 @dispatch(datetime)
 def discover(dt):
-    if dt.time() and dt.date():
-        return datetime_
-    elif dt.date():
-        return date_
-    else:
-        return time_
+    return datetime_
+
+
+@dispatch(timedelta)
+def discover(td):
+    return TimeDelta(unit='us')
 
 
 @dispatch(date)
@@ -67,32 +69,62 @@ bools = {'False': False,
          'true': True}
 
 
-string_coercions = [int, float, bools.__getitem__, dateparse]
+def timeparse(x, formats=('%H:%M:%S', '%H:%M:%S.%f')):
+    e = None
+    for format in formats:
+        try:
+            return datetime.strptime(x, format).time()
+        except ValueError as e:  # raises if it doesn't match the format
+            pass
+    raise e
+
+
+def deltaparse(x):
+    value, unit = re.split('\s+', x.strip())
+    value = float(value)
+    if not value.is_integer():
+        raise ValueError('floating point timedelta values not supported')
+    return np.timedelta64(int(value), TimeDelta(unit=unit).unit)
+
+
+string_coercions = [int, float, bools.__getitem__, deltaparse, timeparse,
+                    dateparse]
 
 
 @dispatch(_strtypes)
 def discover(s):
     if not s:
         return null
-    for f in string_coercions:
+    for f in [int, float, bools.__getitem__, deltaparse, timeparse]:
         try:
             return discover(f(s))
         except:
             pass
+    try:
+        d = dateparse(s)
+        if not d.time():
+            return date_
+        if not d.date():
+            return time_
+        return datetime_
+    except:
+        pass
 
     return string
 
 
-@dispatch((tuple, list))
+@dispatch((tuple, list, set))
 def discover(seq):
+    if not seq:
+        return var * string
     unite = do_one([unite_identical, unite_base, unite_merge_dimensions])
     # [(a, b), (a, c)]
     if (all(isinstance(item, (tuple, list)) for item in seq) and
             len(set(map(len, seq))) == 1):
         columns = list(zip(*seq))
         try:
-            types = [unite([discover(dshape) for dshape in column]).subshape[0]
-                                             for column in columns]
+            types = [unite([discover(data) for data in column]).subshape[0]
+                                           for column in columns]
             unite = do_one([unite_identical, unite_merge_dimensions, Tuple])
             return len(seq) * unite(types)
         except AttributeError:  # no subshape available
@@ -103,8 +135,8 @@ def discover(seq):
         keys = sorted(set.union(*(set(d) for d in seq)))
         columns = [[item.get(key) for item in seq] for key in keys]
         try:
-            types = [unite([discover(dshape) for dshape in column]).subshape[0]
-                                             for column in columns]
+            types = [unite([discover(data) for data in column]).subshape[0]
+                                           for column in columns]
             return len(seq) * Record(list(zip(keys, types)))
         except AttributeError:
             pass
@@ -125,9 +157,9 @@ edges = [
          (string, real),
          (string, date_),
          (string, datetime_),
+         (string, timedelta_),
          (string, bool_),
          (datetime_, date_),
-         (string, datetime_),
          (int64, int32),
          (real, int64),
          (string, null)]
@@ -184,7 +216,7 @@ def unite_base(dshapes):
               ds.names == dshapes[0].names for ds in good_dshapes):
         names = good_dshapes[0].names
         base = Record([[name,
-            unite_base([ds.dict[name] for ds in good_dshapes]).subshape[0]]
+            unite_base([ds.dict.get(name, null) for ds in good_dshapes]).subshape[0]]
             for name in names])
     if base:
         if bynull.get(True):
@@ -200,7 +232,6 @@ def unite_identical(dshapes):
     """
     if len(set(dshapes)) == 1:
         return len(dshapes) * dshapes[0]
-
 
 
 def unite_merge_dimensions(dshapes, unite=unite_identical):
@@ -258,9 +289,39 @@ def discover(n):
     return from_numpy((), type(n))
 
 
+@dispatch(np.timedelta64)
+def discover(n):
+    return from_numpy((), n)
+
+
+def is_string_array(x):
+    """ Is an array of strings
+
+    >>> is_string_array(np.array(['Hello', 'world'], dtype='O'))
+    True
+    >>> is_string_array(np.array(['Hello', None], dtype='O'))
+    False
+    """
+    return all(isinstance(i, _strtypes) for i in x.flat[:5].tolist())
+
+
 @dispatch(np.ndarray)
-def discover(X):
-    return from_numpy(X.shape, X.dtype)
+def discover(x):
+    ds = from_numpy(x.shape, x.dtype)
+
+    # NumPy uses object dtype both for strings (which we want to call string)
+    # and for Python objects (which we want to call object)
+    # Lets look at the first few elements and check
+    if ds.measure == object_ and is_string_array(x):
+        return DataShape(*(ds.shape + (string,)))
+
+    if isrecord(ds.measure) and object_ in ds.measure.types:
+        m = Record([[name, string if typ == object_ and is_string_array(x[name])
+                                  else typ]
+                    for name, typ in ds.measure.parameters[0]])
+        return DataShape(*(ds.shape + (m,)))
+    else:
+        return ds
 
 
 def descendents(d, x):
